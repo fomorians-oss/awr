@@ -1,0 +1,20 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[packages]
+gym = {extras = ["box2d"],version = "*"}
+attrs = "==19.1.0"
+fomoro-pyoneer = {editable = true,path = "/home/dan/code/pyoneer"}
+tensorflow = "==2.0.0"
+tensorflow-probability = "==0.8.0"
+
+[dev-packages]
+jupyterlab = "*"
+matplotlib = "*"
+seaborn = "*"
+ipdb = "*"
+
+[requires]
+python_version = "3.6"

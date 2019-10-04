@@ -1,0 +1,9 @@
+.ipynb_checkpoints/
+.DS_Store
+
+jobs/
+dist/
+sac.egg-info/
+__pycache__/
+
+MANIFEST
