@@ -13,9 +13,10 @@ from awr.data import episodic_mean, flatten_transitions
 
 
 class Algorithm:
-    def __init__(self, job_dir, params):
+    def __init__(self, job_dir, params, data_dir=None):
         self.job_dir = job_dir
         self.params = params
+        self.data_dir = data_dir
 
         self.explore_env_model = create_env_model(params.env, params.batch_size)
         self.exploit_env_model = create_env_model(params.env, params.batch_size)
@@ -27,13 +28,23 @@ class Algorithm:
         self.policy_optimizer = tf.keras.optimizers.Adam(params.learning_rate)
 
         n_step = 1 if params.flatten else self.explore_env_model._max_episode_steps
+        params.num_samples = params.num_samples if params.flatten else params.num_samples  # // 10
+        params.max_size = params.max_size if params.flatten else params.max_size // self.max_steps
 
+        # Instantiate replay buffer.
         self.buffer = pyrl.transitions.ReplayBuffer(
             (self.agent.output_specs, self.exploit_env_model.output_specs),
             n_step=n_step,
-            max_size=params.max_size_flat if params.flatten else params.max_size,
+            max_size=params.max_size,
             initializers=tf.zeros,
         )
+
+        # Load batch dataset if directory specified.
+        if data_dir is not None:
+            self.online_job = pynr.jobs.Job(
+                directory=data_dir, buffer=self.buffer
+            )
+            status = self.online_job.restore().expect_partial()
 
         checkpointables = {
             "agent": self.agent,
@@ -207,14 +218,14 @@ class Algorithm:
 
         return agent_outputs, env_outputs
 
-    @tf.function
+    # @tf.function
     def _update_buffer(self, agent_outputs, env_outputs):
         # Add new transitions to replay buffer.
         if self.params.flatten:
             self.buffer.write(flatten_transitions(agent_outputs, env_outputs))
         else:
             self.buffer.write((agent_outputs, env_outputs))
-
+        
         # Make summaries.
         with self.job.summary_context("train"):
             tf.summary.scalar(
@@ -223,25 +234,26 @@ class Algorithm:
 
     def _train(self, it):
         # Data collection.
-        if self.params.episodes_train > 0:
-            with pynr.debugging.Stopwatch() as stopwatch:
-                # Collect new transitions using exploration policy.
-                agent_outputs, env_outputs = self._collect_transitions(
-                    self.explore_strategy, self.params.episodes_train
-                )
+        if self.data_dir is None:
+            if self.params.episodes_train > 0:
+                with pynr.debugging.Stopwatch() as stopwatch:
+                    # Collect new transitions using exploration policy.
+                    agent_outputs, env_outputs = self._collect_transitions(
+                        self.explore_strategy, self.params.episodes_train
+                    )
 
-            # Update transition buffer with exploration trajectories.
-            self._update_buffer(agent_outputs, env_outputs)
+                # Update transition buffer with exploration trajectories.
+                self._update_buffer(agent_outputs, env_outputs)
 
-            # Make summaries.
-            with self.job.summary_context("train"):
-                episodic_reward = episodic_mean(env_outputs.reward)
+                # Make summaries.
+                with self.job.summary_context("train"):
+                    episodic_reward = episodic_mean(env_outputs.reward)
 
-                tf.summary.scalar(
-                    "episodic_rewards/train",
-                    episodic_reward,
-                    step=self.policy_optimizer.iterations,
-                )
+                    tf.summary.scalar(
+                        "episodic_rewards/train",
+                        episodic_reward,
+                        step=self.policy_optimizer.iterations,
+                    )
 
         # Sample trajectories and train value and policy networks.
         agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_samples)
@@ -300,11 +312,12 @@ class Algorithm:
 
     def train(self):
         # Sample random trajectories to pre-fill the replay buffer.
-        while self.buffer.count < self.params.steps_init:
-            agent_outputs, env_outputs = self._collect_transitions(
-                policy=self.explore_strategy, episodes=1
-            )
-            self._update_buffer(agent_outputs, env_outputs)
+        if self.data_dir is None:
+            while self.buffer.count < self.params.steps_init:
+                agent_outputs, env_outputs = self._collect_transitions(
+                    policy=self.explore_strategy, episodes=1
+                )
+                self._update_buffer(agent_outputs, env_outputs)
 
         # Begin training.
         for it in range(self.params.iterations):

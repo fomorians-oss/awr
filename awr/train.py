@@ -11,10 +11,11 @@ from awr.algorithm import Algorithm
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--job-dir", required=True)
+    parser.add_argument("--job-dir", required=True, type=str)
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--env", default="Pendulum-v0")
     parser.add_argument("--flatten", action="store_true")
+    parser.add_argument("--data-dir", type=str)
     args = parser.parse_args()
     print("args:", args)
 
@@ -35,7 +36,7 @@ def main():
     print("params:", params)
 
     # training
-    algorithm = Algorithm(job_dir=job_dir, params=params)
+    algorithm = Algorithm(job_dir=job_dir, params=params, data_dir=args.data_dir)
     algorithm.train()
 
 

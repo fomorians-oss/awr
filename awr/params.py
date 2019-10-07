@@ -10,15 +10,16 @@ class HyperParams:
     learning_rate = attr.ib(default=1e-3, type=float)
     flatten = attr.ib(default=False, type=bool)  # flatten episode/step dims
     num_critics = attr.ib(default=2, type=int)
-    iterations = attr.ib(default=2500, type=int)  # number of train/eval iterations
-    max_size = attr.ib(default=int(1e3), type=int)  # maximum transition buffer size
-    max_size_flat = attr.ib(default=int(1e6), type=int)  # maximum transition buffer size
+    iterations = attr.ib(default=100, type=int)  # number of train/eval iterations
+    max_size = attr.ib(
+        default=int(1e6), type=int
+    )  # maximum transition buffer size
     num_samples = attr.ib(
         default=256 * 100, type=int
     )  # number of transitions to sample
     batch_size = attr.ib(default=128, type=int)  # dataset batch size each iteration
     steps_init = attr.ib(default=int(1e3), type=int)  # number of initial episodes
-    eval_iters = attr.ib(default=10, type=int)
+    eval_iters = attr.ib(default=1, type=int)
     episodes_train = attr.ib(default=1, type=int)  # number of episodes to append
     episodes_eval = attr.ib(default=100, type=int)  # number of evaluation episodes
     discount = attr.ib(default=0.99, type=float)
