@@ -55,12 +55,7 @@ class Agent(tf.Module):
                 kernel_initializer=logits_initializer,
             )
 
-        self._value = tf.keras.Sequential(
-            [
-                tf.keras.layers.Dense(128, activation=tf.nn.relu),
-                tf.keras.layers.Dense(1),
-            ]
-        )
+        self._value = tf.keras.layers.Dense(1, kernel_initializer=logits_initializer)
 
         if self._is_discrete:
             self._policy = tfp.distributions.Categorical
@@ -162,7 +157,7 @@ class Agent(tf.Module):
         else:
             policy = self._continuous(hidden)
             entropy = -policy.log_prob(agent_outputs.action)
-        
+
         log_prob = policy.log_prob(agent_outputs.action)
         value = tf.squeeze(self._value(hidden), axis=-1)
         return AgentPolicyValueOutput(log_prob=log_prob, entropy=entropy, value=value)
@@ -192,7 +187,7 @@ class Agent(tf.Module):
                 action = policy.mode()
             else:
                 action = policy.bijector.forward(policy.distribution.mode())
-        
+
         action = tf.nest.map_structure(
             lambda t, s: tf.cast(t, s.dtype), action, self.action_spec
         )

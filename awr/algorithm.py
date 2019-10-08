@@ -21,6 +21,9 @@ class Algorithm:
         self.explore_env_model = create_env_model(params.env, params.env_batch_size)
         self.exploit_env_model = create_env_model(params.env, params.env_batch_size)
 
+        self.explore_env_model.seed(params.seed)
+        self.exploit_env_model.seed(params.seed)
+
         self.max_steps = self.exploit_env_model._max_episode_steps
 
         self.agent = Agent(
@@ -28,8 +31,12 @@ class Algorithm:
             self.explore_env_model.state_spec,
             self.explore_env_model.action_spec,
         )
-        self.value_optimizer = tf.keras.optimizers.Adam(params.learning_rate, clipnorm=1.0)
-        self.policy_optimizer = tf.keras.optimizers.Adam(params.learning_rate, clipnorm=1.0)
+        self.value_optimizer = tf.keras.optimizers.Adam(
+            params.learning_rate, clipnorm=1.0
+        )
+        self.policy_optimizer = tf.keras.optimizers.Adam(
+            params.learning_rate, clipnorm=1.0
+        )
 
         if params.flatten:
             mock_env_outputs = pynr.debugging.mock_spec(
@@ -52,16 +59,14 @@ class Algorithm:
             env_outputs=mock_env_outputs, agent_outputs=mock_agent_outputs
         )
 
-        n_step = 1 if params.flatten else self.max_steps
-        params.num_samples = (
-            params.num_samples if params.flatten else params.num_samples // 100
-        )
-        params.max_size = (
-            params.max_size if params.flatten else params.max_size // self.max_steps
-        )
-        params.steps_init = (
-            params.steps_init if params.flatten else params.steps_init // 100
-        )
+        if params.flatten:
+            n_step = 1
+        if not params.flatten:
+            n_step = self.max_steps
+            params.num_value_samples //= 100
+            params.num_policy_samples //= 100
+            params.max_size //= self.max_steps
+            params.steps_init //= 100
 
         # Instantiate replay buffer.
         self.buffer = pyrl.transitions.ReplayBuffer(
@@ -103,7 +108,7 @@ class Algorithm:
             n_step=self.max_steps,
         )
 
-    # @tf.function
+    @tf.function
     def _train_value(self, env_outputs):
         # Get bootstrap values if training on one-step rollouts.
         bootstrap_value = None
@@ -113,7 +118,7 @@ class Algorithm:
                 1 - tf.cast(env_outputs.terminal, tf.float32)
             )
             bootstrap_value = tf.squeeze(bootstrap_value)
-        
+
         # Compute discounted returns to use as value network regression targets.
         returns = self.discounted_returns(
             tf.cast(env_outputs.reward, tf.float32) * env_outputs.weight,
@@ -161,7 +166,7 @@ class Algorithm:
                 "grad_norm/critic", grad_norm, step=self.value_optimizer.iterations
             )
 
-    # @tf.function
+    @tf.function
     def _train_policy(self, agent_outputs, env_outputs):
         # Compute value baseline.
         agent_value_outputs = self.agent.value(env_outputs)
@@ -231,24 +236,6 @@ class Algorithm:
                 "policy/log_prob", log_prob, step=self.policy_optimizer.iterations
             )
 
-    # @tf.function
-    def _train_batch(self, agent_outputs, env_outputs):
-        # Alternative training value and policy networks.
-        self._train_value(env_outputs)
-        self._train_policy(agent_outputs, env_outputs)
-
-    # @tf.function
-    def _train_data(self, agent_outputs, env_outputs):
-        # Make tensorflow dataset from batch of sampled trajectories.
-        dataset = (
-            tf.data.Dataset.from_tensor_slices((agent_outputs, env_outputs))
-            .batch(self.params.batch_size, drop_remainder=True)
-            .prefetch(tf.data.experimental.AUTOTUNE)
-        )
-        # Train on sampled trajectories.
-        for agent_outputs, env_outputs in dataset:
-            self._train_batch(agent_outputs, env_outputs)
-
     @tf.function
     def _collect_transitions(self, policy, episodes):
         # Collect new transitions using the exploration policy.
@@ -294,11 +281,27 @@ class Algorithm:
                         step=self.policy_optimizer.iterations,
                     )
 
-        # Sample trajectories and train value and policy networks.
-        agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_samples)
         with pynr.debugging.Stopwatch() as stopwatch:
-            self._train_data(agent_outputs, env_outputs)
+            # Sample trajectories and train value network.
+            _, env_outputs = self.buffer.sample(size=self.params.num_value_samples)
+            dataset = (
+                tf.data.Dataset.from_tensor_slices(env_outputs)
+                .batch(self.params.batch_size, drop_remainder=True)
+                .prefetch(tf.data.experimental.AUTOTUNE)
+            )
+            for env_outputs in dataset:
+                self._train_value(env_outputs)
 
+            # Sample trajectories and train policy network.
+            agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_policy_samples)
+            dataset = (
+                tf.data.Dataset.from_tensor_slices((agent_outputs, env_outputs))
+                .batch(self.params.batch_size, drop_remainder=True)
+                .prefetch(tf.data.experimental.AUTOTUNE)
+            )
+            for agent_outputs, env_outputs in dataset:
+                self._train_value(env_outputs)
+            
         tf.print("Iteration %d" % it)
 
     def _eval(self, it):

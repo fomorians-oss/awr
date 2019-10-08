@@ -12,9 +12,12 @@ class HyperParams:
     num_critics = attr.ib(default=2, type=int)
     iterations = attr.ib(default=1000, type=int)  # number of train/eval iterations
     max_size = attr.ib(default=int(1e5), type=int)  # maximum transition buffer size
-    num_samples = attr.ib(
+    num_value_samples = attr.ib(
         default=256 * 100, type=int
-    )  # number of transitions to sample
+    )  # number of transitions to sample for value function training
+    num_policy_samples = attr.ib(
+        default=256 * 500, type=int
+    )  # number of transitions to sample for policy training
     batch_size = attr.ib(default=256, type=int)  # dataset batch size each iteration
     env_batch_size = attr.ib(default=64, type=int)
     steps_init = attr.ib(default=int(1e3), type=int)  # number of initial episodes
