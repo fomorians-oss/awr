@@ -8,7 +8,6 @@ def create_env_model(env="CartPole-v1", batch_size=None):
 
     def make_fn():
         env = gym.make(env_spec)
-        env.observation_space.dtype = "float64"
         return env
 
     if batch_size is None:
