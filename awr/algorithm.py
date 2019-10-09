@@ -18,8 +18,8 @@ class Algorithm:
         self.params = params
         self.data_dir = data_dir
 
-        self.explore_env_model = create_env_model(params.env, params.env_batch_size)
-        self.exploit_env_model = create_env_model(params.env, params.env_batch_size)
+        self.explore_env_model = create_env_model(params.env, params.episodes_train)
+        self.exploit_env_model = create_env_model(params.env, params.episodes_eval)
 
         self.explore_env_model.seed(params.seed)
         self.exploit_env_model.seed(params.seed)
@@ -32,10 +32,10 @@ class Algorithm:
             self.explore_env_model.action_spec,
         )
         self.value_optimizer = tf.keras.optimizers.Adam(
-            params.learning_rate, clipnorm=1.0
+            params.learning_rate, clipnorm=params.grad_clipping
         )
         self.policy_optimizer = tf.keras.optimizers.Adam(
-            params.learning_rate, clipnorm=1.0
+            params.learning_rate, clipnorm=params.grad_clipping
         )
 
         if params.flatten:
@@ -251,7 +251,7 @@ class Algorithm:
             self.buffer.write(flatten_transitions(agent_outputs, env_outputs))
         else:
             self.buffer.write((agent_outputs, env_outputs))
-
+        
         # Make summaries.
         with self.job.summary_context("train"):
             tf.summary.scalar(
@@ -262,11 +262,10 @@ class Algorithm:
         # Data collection.
         if self.data_dir is None:
             if self.params.episodes_train > 0:
-                with pynr.debugging.Stopwatch() as stopwatch:
-                    # Collect new transitions using exploration policy.
-                    agent_outputs, env_outputs = self._collect_transitions(
-                        self.explore_strategy, self.params.episodes_train
-                    )
+                # Collect new transitions using exploration policy.
+                agent_outputs, env_outputs = self._collect_transitions(
+                    self.explore_strategy, self.params.episodes_train
+                )
 
                 # Update transition buffer with exploration trajectories.
                 self._update_buffer(agent_outputs, env_outputs)
@@ -281,26 +280,26 @@ class Algorithm:
                         step=self.policy_optimizer.iterations,
                     )
 
-        with pynr.debugging.Stopwatch() as stopwatch:
-            # Sample trajectories and train value network.
-            _, env_outputs = self.buffer.sample(size=self.params.num_value_samples)
-            dataset = (
-                tf.data.Dataset.from_tensor_slices(env_outputs)
-                .batch(self.params.batch_size, drop_remainder=True)
-                .prefetch(tf.data.experimental.AUTOTUNE)
-            )
-            for env_outputs in dataset:
-                self._train_value(env_outputs)
+        # Sample trajectories and train value network.
+        _, env_outputs = self.buffer.sample(size=self.params.num_value_samples)
+        dataset = (
+            tf.data.Dataset.from_tensor_slices(env_outputs)
+            .batch(self.params.batch_size, drop_remainder=True)
+            .prefetch(tf.data.experimental.AUTOTUNE)
+        )
+        for env_outputs in dataset:
+            self._train_value(env_outputs)
 
-            # Sample trajectories and train policy network.
-            agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_policy_samples)
-            dataset = (
-                tf.data.Dataset.from_tensor_slices((agent_outputs, env_outputs))
-                .batch(self.params.batch_size, drop_remainder=True)
-                .prefetch(tf.data.experimental.AUTOTUNE)
-            )
-            for agent_outputs, env_outputs in dataset:
-                self._train_value(env_outputs)
+        # Sample trajectories and train policy network.
+        agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_policy_samples)
+
+        dataset = (
+            tf.data.Dataset.from_tensor_slices((agent_outputs, env_outputs))
+            .batch(self.params.batch_size, drop_remainder=True)
+            .prefetch(tf.data.experimental.AUTOTUNE)
+        )
+        for agent_outputs, env_outputs in dataset:
+            self._train_policy(agent_outputs, env_outputs)
             
         tf.print("Iteration %d" % it)
 

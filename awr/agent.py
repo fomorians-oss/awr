@@ -34,7 +34,7 @@ class Agent(tf.Module):
                     128, activation=tf.nn.relu, kernel_initializer=kernel_initializer
                 ),
                 tf.keras.layers.Dense(
-                    128, activation=tf.nn.relu, kernel_initializer=kernel_initializer
+                    64, activation=tf.nn.relu, kernel_initializer=kernel_initializer
                 ),
             ]
         )
@@ -60,7 +60,7 @@ class Agent(tf.Module):
         if self._is_discrete:
             self._policy = tfp.distributions.Categorical
         else:
-            self._policy = tfp.distributions.Normal
+            self._policy = tfp.distributions.MultivariateNormalDiag
 
         self.state_spec = state_spec
         self.action_spec = action_spec
@@ -138,7 +138,7 @@ class Agent(tf.Module):
             ]
         )
 
-        base_dist = tfp.distributions.MultivariateNormalDiag(
+        base_dist = self._policy(
             loc=tf.zeros_like(loc), scale_diag=tf.ones_like(scale_diag)
         )
         policy = tfp.distributions.TransformedDistribution(
@@ -187,7 +187,7 @@ class Agent(tf.Module):
                 action = policy.mode()
             else:
                 action = policy.bijector.forward(policy.distribution.mode())
-
+        
         action = tf.nest.map_structure(
             lambda t, s: tf.cast(t, s.dtype), action, self.action_spec
         )
