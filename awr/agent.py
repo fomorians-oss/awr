@@ -10,57 +10,23 @@ import tensorflow_probability as tfp
 AgentPolicyOutput = namedtuple("AgentPolicyOutput", ["action"])
 AgentValueOutput = namedtuple("AgentValueOutput", ["value"])
 AgentPolicyValueOutput = namedtuple(
-    "AgentPolicyValueOutput", ["log_prob", "entropy", "value"]
+    "AgentPolicyValueOutput", ["log_prob", "entropy", "value", "logits"]
 )
 
 
 class Agent(tf.Module):
-    def __init__(self, action_space, state_spec, action_spec):
+    def __init__(self, observation_space, action_space, state_spec, action_spec):
         super(Agent, self).__init__(name="Agent")
-
-        if hasattr(action_space, "n"):
-            self._is_discrete = True
-            self._n_outputs = action_space.n
-        else:
-            self._is_discrete = False
-            self._n_outputs = np.prod(action_space.shape)
-
-        kernel_initializer = tf.initializers.VarianceScaling(scale=2.0)
-        logits_initializer = tf.initializers.VarianceScaling(scale=1.0)
-
-        self._hidden = tf.keras.Sequential(
+        self._hidden = tf.keras.layers.Dense(128, activation=tf.nn.relu)
+        self._logits = tf.keras.Sequential(
             [
-                tf.keras.layers.Dense(
-                    128, activation=tf.nn.relu, kernel_initializer=kernel_initializer
-                ),
-                tf.keras.layers.Dense(
-                    128, activation=tf.nn.relu, kernel_initializer=kernel_initializer
-                ),
+                tf.keras.layers.Dense(64, activation=tf.nn.relu),
+                tf.keras.layers.Dense(action_space.n),
             ]
         )
-
-        if self._is_discrete:
-            self._logits = tf.keras.layers.Dense(
-                self._n_outputs, kernel_initializer=logits_initializer
-            )
-        else:
-            self._loc = tf.keras.layers.Dense(
-                units=self._n_outputs,
-                activation=None,
-                kernel_initializer=logits_initializer,
-            )
-            self._scale_diag = tf.keras.layers.Dense(
-                units=self._n_outputs,
-                activation=tf.exp,
-                kernel_initializer=logits_initializer,
-            )
-
-        self._value = tf.keras.layers.Dense(1, kernel_initializer=logits_initializer)
-
-        if self._is_discrete:
-            self._policy = tfp.distributions.Categorical
-        else:
-            self._policy = tfp.distributions.Normal
+        self._value = tf.keras.Sequential(
+            [tf.keras.layers.Dense(64, activation=tf.nn.relu), tf.keras.layers.Dense(1)]
+        )
 
         self.state_spec = state_spec
         self.action_spec = action_spec
@@ -91,10 +57,26 @@ class Agent(tf.Module):
                 + self._scale_diag.trainable_variables
             )
 
-    @tf.function
     def _scale_state(self, state):
         state = tf.cast(state, dtype=tf.float32)
-        return self.states_normalizer(state)
+        observation_high = np.where(
+            self.observation_space.high < np.finfo(np.float32).max,
+            self.observation_space.high,
+            +1.0,
+        )
+        observation_low = np.where(
+            self.observation_space.low > np.finfo(np.float32).min,
+            self.observation_space.low,
+            -1.0,
+        )
+
+        observation_mean, observation_var = pynr.moments.range_moments(
+            observation_low, observation_high
+        )
+        state_norm = tf.math.divide_no_nan(
+            state - observation_mean, tf.sqrt(observation_var)
+        )
+        return state
 
     @tf.function
     def initialize(self, env_outputs, agent_outputs):
@@ -160,7 +142,9 @@ class Agent(tf.Module):
 
         log_prob = policy.log_prob(agent_outputs.action)
         value = tf.squeeze(self._value(hidden), axis=-1)
-        return AgentPolicyValueOutput(log_prob=log_prob, entropy=entropy, value=value)
+        return AgentPolicyValueOutput(
+            log_prob=log_prob, entropy=entropy, value=value, logits=logits
+        )
 
     @tf.function
     def reset(self, env_outputs, explore=True):
