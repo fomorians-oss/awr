@@ -13,37 +13,55 @@ from awr.data import episodic_mean, flatten_transitions
 
 
 class Algorithm:
-    def __init__(self, job_dir, params, data_dir=None):
+    def __init__(self, job_dir, params, data_dir=None, gcp=False):
         self.job_dir = job_dir
         self.params = params
         self.data_dir = data_dir
+        self.gcp = gcp
 
-        self.explore_env_model = create_env_model(params.env, params.batch_size)
-        self.exploit_env_model = create_env_model(params.env, params.batch_size)
+        self.explore_env_model = create_env_model(params.env, params.episodes_train)
+        self.exploit_env_model = create_env_model(params.env, params.episodes_eval)
+
+        self.explore_env_model.seed(params.seed)
+        self.exploit_env_model.seed(params.seed)
 
         self.max_steps = self.exploit_env_model._max_episode_steps
 
-        self.agent = Agent(self.explore_env_model.action_spec)
-        self.value_optimizer = tf.keras.optimizers.Adam(params.learning_rate)
-        self.policy_optimizer = tf.keras.optimizers.Adam(params.learning_rate)
+        self.agent = Agent(
+            self.explore_env_model.observation_space,
+            self.explore_env_model.action_space,
+            self.explore_env_model.state_spec,
+            self.explore_env_model.action_spec,
+        )
+        self.value_optimizer = tf.keras.optimizers.Adam(
+            params.learning_rate, clipnorm=params.clipnorm
+        )
+        self.policy_optimizer = tf.keras.optimizers.Adam(
+            params.learning_rate, clipnorm=params.clipnorm
+        )
 
-        n_step = 1 if params.flatten else self.explore_env_model._max_episode_steps
-        params.num_samples = params.num_samples if params.flatten else params.num_samples  # // 10
-        params.max_size = params.max_size if params.flatten else params.max_size // self.max_steps
+        if params.flatten:
+            n_step = 1
+            params.max_size = param.max_size_flat
+            params.steps_init = param.steps_init_flat
+            params.num_samples = param.num_samples_flat
+            params.batch_size = param.batch_size_flat
+        else:
+            n_step = self.explore_env_model._max_episode_steps
+        
+        if self.data_dir is not None:
+            params.eval_iters = 1
 
         # Instantiate replay buffer.
         self.buffer = pyrl.transitions.ReplayBuffer(
             (self.agent.output_specs, self.exploit_env_model.output_specs),
             n_step=n_step,
             max_size=params.max_size,
-            initializers=tf.zeros,
         )
 
         # Load batch dataset if directory specified.
         if data_dir is not None:
-            self.online_job = pynr.jobs.Job(
-                directory=data_dir, buffer=self.buffer
-            )
+            self.online_job = pynr.jobs.Job(directory=data_dir, buffer=self.buffer)
             status = self.online_job.restore().expect_partial()
 
         checkpointables = {
@@ -92,46 +110,45 @@ class Algorithm:
             weights=env_outputs.weight,
         )
 
-        # Loop for params.value_steps gradient steps.
-        for _ in range(self.params.value_steps):
-            with tf.GradientTape() as tape:
-                # Compute value of states in sampled trajectories.
-                agent_value_outputs = self.agent.value(env_outputs)
+        with tf.GradientTape() as tape:
+            # Compute value of states in sampled trajectories.
+            agent_value_outputs = self.agent.value(env_outputs)
 
-                # Compute value loss as mean squared error
-                # between predicted values and actual returns.
-                value_loss = self.params.value_scale * tf.reduce_sum(
-                    (
-                        tf.square(agent_value_outputs.value - tf.stop_gradient(returns))
-                        * env_outputs.weight
-                    )
+            # Compute value loss as mean squared error
+            # between predicted values and actual returns.
+            value_loss = self.params.value_scale * tf.reduce_sum(
+                (
+                    tf.square(agent_value_outputs.value - tf.stop_gradient(returns))
+                    * env_outputs.weight
                 )
+            )
 
-                if self.params.flatten:
-                    loss = value_loss / self.params.batch_size
-                else:
-                    loss = value_loss / (self.params.batch_size * self.max_steps)
+            if self.params.flatten:
+                loss = value_loss / self.params.batch_size
+            else:
+                loss = value_loss / (self.params.batch_size * self.max_steps)
 
-            # Compute and apply value network gradients.
-            variables = self.agent.value_trainable_variables
-            grads = tape.gradient(loss, variables)
-            self.value_optimizer.apply_gradients(zip(grads, variables))
+        # Compute and apply value network gradients.
+        variables = self.agent.value_trainable_variables
+        grads = tape.gradient(loss, variables)
+        self.value_optimizer.apply_gradients(zip(grads, variables))
 
         # Make summaries.
-        with self.job.summary_context("train"):
-            grad_norm = tf.linalg.global_norm(grads)
+        if not self.gcp:
+            with self.job.summary_context("train"):
+                grad_norm = tf.linalg.global_norm(grads)
 
-            tf.summary.histogram(
-                "q_values",
-                agent_value_outputs.value,
-                step=self.value_optimizer.iterations,
-            )
-            tf.summary.scalar(
-                "losses/critic", loss, step=self.value_optimizer.iterations
-            )
-            tf.summary.scalar(
-                "grad_norm/critic", grad_norm, step=self.value_optimizer.iterations
-            )
+                tf.summary.histogram(
+                    "values",
+                    agent_value_outputs.value,
+                    step=self.value_optimizer.iterations,
+                )
+                tf.summary.scalar(
+                    "losses/critic", loss, step=self.value_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "grad_norm/critic", grad_norm, step=self.value_optimizer.iterations
+                )
 
     def _train_policy(self, agent_outputs, env_outputs):
         # Compute value baseline.
@@ -148,50 +165,89 @@ class Algorithm:
 
         # Compute advantages using TD(lambda).
         advantages = self.generalized_advantage_estimate(
-            tf.cast(env_outputs.reward, tf.float32) * env_outputs.weight,
-            agent_value_outputs.value * env_outputs.weight,
+            tf.cast(env_outputs.reward, tf.float32),
+            agent_value_outputs.value,
             discounts=self.params.discount,
             lambdas=self.params.lambda_,
             weights=env_outputs.weight,
             last_value=bootstrap_value,
         )
 
-        # Loop for params.policy_steps gradient steps.
-        for _ in range(self.params.policy_steps):
-            with tf.GradientTape() as tape:
-                # Compute estimate of policy distribution.
-                agent_estimates_output = self.agent.policy_value(
-                    env_outputs, agent_outputs
+        with tf.GradientTape() as tape:
+            # Compute estimate of policy distribution.
+            agent_estimates_output = self.agent.policy_value(env_outputs, agent_outputs)
+
+            # Compute unnormalized distribution implied by scaled, exponentiated advantages.
+            score = tf.minimum(
+                tf.exp(advantages / self.params.beta), self.params.score_max
+            )
+
+            # Compute policy loss as mismatch between policy and scaled advantage distribution.
+            policy_loss = -tf.reduce_sum(
+                agent_estimates_output.log_prob
+                * tf.stop_gradient(score)
+                * env_outputs.weight
+            )
+
+            # Compute L2 regularization loss.
+            logits = agent_estimates_output.logits
+            l2_loss = tf.reduce_sum(0.5 * tf.square(logits))
+
+            if self.params.flatten:
+                loss = policy_loss / self.params.batch_size + self.params.l2_coef * (
+                    l2_loss / self.params.batch_size
+                )
+            else:
+                loss = policy_loss / (
+                    self.params.batch_size * self.max_steps
+                ) + self.params.l2_coef * (
+                    l2_loss / (self.params.batch_size * self.max_steps)
                 )
 
-                # Compute unnormalized distribution implied by scaled, exponentiated advantages.
-                score = tf.minimum(
-                    tf.exp(advantages / self.params.beta), self.params.score_max
-                )
+        # Compute and apply gradients to policy parameters.
+        variables = self.agent.policy_trainable_variables
+        grads = tape.gradient(loss, variables)
+        self.policy_optimizer.apply_gradients(zip(grads, variables))
 
-                # Compute policy loss as mismatch between policy and scaled advantage distribution.
-                policy_loss = -tf.reduce_sum(
-                    agent_estimates_output.log_prob
-                    * tf.stop_gradient(score)
-                    * env_outputs.weight
-                )
-                loss = policy_loss / (self.params.batch_size * self.max_steps)
-
-            # Compute and apply gradients to policy parameters.
-            variables = self.agent.policy_trainable_variables
-            grads = tape.gradient(loss, variables)
-            self.policy_optimizer.apply_gradients(zip(grads, variables))
+        entropy = tf.reduce_mean(agent_estimates_output.entropy)
+        value = tf.reduce_mean(agent_estimates_output.value)
+        log_prob = tf.reduce_mean(agent_estimates_output.log_prob)
+        logits = tf.reduce_mean(agent_estimates_output.logits)
 
         # Make summaries.
-        with self.job.summary_context("train"):
-            grad_norm = tf.linalg.global_norm(grads)
+        if not self.gcp:
+            with self.job.summary_context("train"):
+                grad_norm = tf.linalg.global_norm(grads)
 
-            tf.summary.scalar(
-                "losses/policy", loss, step=self.policy_optimizer.iterations
-            )
-            tf.summary.scalar(
-                "grad_norm/policy", grad_norm, step=self.policy_optimizer.iterations
-            )
+                tf.summary.histogram(
+                    "policy/advantages",
+                    advantages,
+                    step=self.policy_optimizer.iterations,
+                )
+                tf.summary.histogram(
+                    "policy/score", score, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "losses/policy", policy_loss, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "losses/l2", l2_loss, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "grad_norm/policy", grad_norm, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "policy/entropy", entropy, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "policy/value", value, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "policy/log_prob", log_prob, step=self.policy_optimizer.iterations
+                )
+                tf.summary.scalar(
+                    "policy/logits", logits, step=self.policy_optimizer.iterations
+                )
 
     def _train_batch(self, agent_outputs, env_outputs):
         # Alternative training value and policy networks.
@@ -210,7 +266,7 @@ class Algorithm:
         for agent_outputs, env_outputs in dataset:
             self._train_batch(agent_outputs, env_outputs)
 
-    @tf.function
+    # @tf.function
     def _collect_transitions(self, policy, episodes):
         # Collect new transitions using the exploration policy.
         with tf.device("/cpu:0"):
@@ -218,19 +274,22 @@ class Algorithm:
 
         return agent_outputs, env_outputs
 
-    # @tf.function
+    @tf.function
     def _update_buffer(self, agent_outputs, env_outputs):
         # Add new transitions to replay buffer.
         if self.params.flatten:
             self.buffer.write(flatten_transitions(agent_outputs, env_outputs))
         else:
             self.buffer.write((agent_outputs, env_outputs))
-        
+
         # Make summaries.
-        with self.job.summary_context("train"):
-            tf.summary.scalar(
-                "buffer/size", self.buffer.count, step=self.policy_optimizer.iterations
-            )
+        if not self.gcp:
+            with self.job.summary_context("train"):
+                tf.summary.scalar(
+                    "buffer/size",
+                    self.buffer.count,
+                    step=self.policy_optimizer.iterations,
+                )
 
     def _train(self, it):
         # Data collection.
@@ -255,16 +314,23 @@ class Algorithm:
                         step=self.policy_optimizer.iterations,
                     )
 
+                    if not self.gcp:
+                        tf.summary.histogram(
+                            "policy/train/actions",
+                            agent_outputs.action,
+                            step=self.policy_optimizer.iterations,
+                        )
+
         # Sample trajectories and train value and policy networks.
         agent_outputs, env_outputs = self.buffer.sample(size=self.params.num_samples)
         with pynr.debugging.Stopwatch() as stopwatch:
             self._train_data(agent_outputs, env_outputs)
 
-        tf.print(f"Iteration {it}")
+        tf.print("Iteration %d" % it)
 
     def _eval(self, it):
         # Run rollouts under exploitation policy to evaluate performance.
-        _, eval_env_outputs = self.exploit_rollout().outputs
+        agent_outputs, eval_env_outputs = self.exploit_rollout().outputs
         eval_returns = tf.reduce_sum(
             tf.cast(eval_env_outputs.reward, tf.float32) * eval_env_outputs.weight,
             axis=1,
@@ -279,7 +345,14 @@ class Algorithm:
                 step=self.policy_optimizer.iterations,
             )
 
-        tf.print(f"Avg. eval reward: {episodic_reward.numpy()}")
+            if not self.gcp:
+                tf.summary.histogram(
+                    "policy/eval/actions",
+                    agent_outputs.action,
+                    step=self.policy_optimizer.iterations,
+                )
+
+        tf.print("Eval reward: %.3f" % episodic_reward.numpy())
 
     def _train_iter(self, it):
         # Train.

@@ -1,6 +1,7 @@
 import math
 from collections import namedtuple
 
+import numpy as np
 import pyoneer as pynr
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -9,22 +10,27 @@ import tensorflow_probability as tfp
 AgentPolicyOutput = namedtuple("AgentPolicyOutput", ["action"])
 AgentValueOutput = namedtuple("AgentValueOutput", ["value"])
 AgentPolicyValueOutput = namedtuple(
-    "AgentPolicyValueOutput", ["log_prob", "entropy", "value"]
+    "AgentPolicyValueOutput", ["log_prob", "entropy", "value", "logits"]
 )
 
 
 class Agent(tf.Module):
-    def __init__(self, action_spec):
+    def __init__(self, observation_space, action_space, state_spec, action_spec):
         super(Agent, self).__init__(name="Agent")
-        self._hidden = tf.keras.layers.Dense(32, activation=tf.nn.relu)
+        self._hidden = tf.keras.layers.Dense(128, activation=tf.nn.relu)
         self._logits = tf.keras.Sequential(
-            [tf.keras.layers.Dense(8, activation=tf.nn.relu), tf.keras.layers.Dense(2)]
+            [
+                tf.keras.layers.Dense(64, activation=tf.nn.relu),
+                tf.keras.layers.Dense(action_space.n),
+            ]
         )
         self._value = tf.keras.Sequential(
-            [tf.keras.layers.Dense(8, activation=tf.nn.relu), tf.keras.layers.Dense(1)]
+            [tf.keras.layers.Dense(64, activation=tf.nn.relu), tf.keras.layers.Dense(1)]
         )
         self._policy = tfp.distributions.Categorical
 
+        self.observation_space = observation_space
+        self.state_spec = state_spec
         self.action_spec = action_spec
         self.output_specs = AgentPolicyOutput(action=self.action_spec)
         self.output_shapes = tf.nest.map_structure(
@@ -42,24 +48,26 @@ class Agent(tf.Module):
     def policy_trainable_variables(self):
         return self._hidden.trainable_variables + self._logits.trainable_variables
 
-    @tf.function
     def _scale_state(self, state):
-        state = tf.cast(state, tf.float32)
-        state = state / [[2.4, 10.0, 1.0, 10.0]]
-        state = tf.concat(
-            [
-                state,
-                tf.stack(
-                    [
-                        tf.math.cos(state[..., 2] / math.pi),
-                        tf.math.sin(state[..., 2] / math.pi),
-                    ],
-                    axis=-1,
-                ),
-            ],
-            axis=-1,
+        state = tf.cast(state, dtype=tf.float32)
+        observation_high = np.where(
+            self.observation_space.high < np.finfo(np.float32).max,
+            self.observation_space.high,
+            +1.0,
         )
-        return tf.clip_by_value(state, -1.0, 1.0)
+        observation_low = np.where(
+            self.observation_space.low > np.finfo(np.float32).min,
+            self.observation_space.low,
+            -1.0,
+        )
+
+        observation_mean, observation_var = pynr.moments.range_moments(
+            observation_low, observation_high
+        )
+        state_norm = tf.math.divide_no_nan(
+            state - observation_mean, tf.sqrt(observation_var)
+        )
+        return state
 
     @tf.function
     def initialize(self, env_outputs, agent_outputs):
@@ -91,7 +99,9 @@ class Agent(tf.Module):
         entropy = policy.entropy()
         log_prob = policy.log_prob(agent_outputs.action)
         value = tf.squeeze(self._value(hidden), axis=-1)
-        return AgentPolicyValueOutput(log_prob=log_prob, entropy=entropy, value=value)
+        return AgentPolicyValueOutput(
+            log_prob=log_prob, entropy=entropy, value=value, logits=logits
+        )
 
     @tf.function
     def reset(self, env_outputs, explore=True):

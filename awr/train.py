@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--env", default="Pendulum-v0")
     parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--data-dir", type=str)
+    parser.add_argument("--gcp", action="store_true")
     args = parser.parse_args()
     print("args:", args)
 
@@ -36,7 +37,9 @@ def main():
     print("params:", params)
 
     # training
-    algorithm = Algorithm(job_dir=job_dir, params=params, data_dir=args.data_dir)
+    algorithm = Algorithm(
+        job_dir=job_dir, params=params, data_dir=args.data_dir, gcp=args.gcp
+    )
     algorithm.train()
 
 
