@@ -92,6 +92,7 @@ class Algorithm:
             n_step=self.max_steps,
         )
 
+    @tf.function
     def _train_value(self, env_outputs):
         # Get bootstrap values if training on one-step rollouts.
         bootstrap_value = None
@@ -150,6 +151,7 @@ class Algorithm:
                     "grad_norm/critic", grad_norm, step=self.value_optimizer.iterations
                 )
 
+    @tf.function
     def _train_policy(self, agent_outputs, env_outputs):
         # Compute value baseline.
         agent_value_outputs = self.agent.value(env_outputs)
@@ -266,7 +268,6 @@ class Algorithm:
         for agent_outputs, env_outputs in dataset:
             self._train_batch(agent_outputs, env_outputs)
 
-    # @tf.function
     def _collect_transitions(self, policy, episodes):
         # Collect new transitions using the exploration policy.
         with tf.device("/cpu:0"):

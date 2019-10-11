@@ -7,7 +7,7 @@ import tensorflow as tf
 class HyperParams:
     seed = attr.ib(type=int)
     env = attr.ib(type=str)
-    learning_rate = attr.ib(default=1e-3, type=float)
+    learning_rate = attr.ib(default=1e-4, type=float)
     flatten = attr.ib(default=False, type=bool)  # flatten episode/step dims
     iterations = attr.ib(default=1000, type=int)  # number of train/eval iterations
     max_size = attr.ib(default=int(5e2), type=int)  # maximum transition buffer size
