@@ -160,7 +160,7 @@ class Agent(tf.Module):
         policy = tfp.distributions.Normal(loc=loc, scale=scale_diag)
         return policy
 
-    # @tf.function
+    @tf.function
     def policy_value(self, env_outputs, agent_outputs):
         state = env_outputs.state
         state = self._scale_state(state)
@@ -184,7 +184,7 @@ class Agent(tf.Module):
         )
         return AgentPolicyOutput(action=initial_action)
 
-    # @tf.function
+    @tf.function
     def step(self, env_outputs, agent_outputs, time_step, explore=True):
         state = env_outputs.next_state
         state = self._scale_state(state)
@@ -198,10 +198,7 @@ class Agent(tf.Module):
         if explore:
             action = policy.sample()
         else:
-            if self._is_discrete:
-                action = policy.mode()
-            else:
-                action = policy.mode()
+            action = policy.mode()
 
         action = tf.nest.map_structure(
             lambda t, s: tf.cast(t, s.dtype), action, self.action_spec
