@@ -12,14 +12,14 @@ class HyperParams:
     iterations = attr.ib(default=1000, type=int)  # number of train/eval iterations
     max_size = attr.ib(default=int(5e2), type=int)  # maximum transition buffer size
     max_size_flat = attr.ib(default=int(5e4))
-    num_samples = attr.ib(
-        default=64 * 100, type=int
-    )  # number of transitions to sample
+    num_samples = attr.ib(default=64 * 100, type=int)  # number of transitions to sample
     num_samples_flat = attr.ib(
         default=256 * 250, type=int
     )  # number of transitions to sample
     batch_size = attr.ib(default=64, type=int)  # dataset batch size each iteration
-    batch_size_flat = attr.ib(default=256, type=int)  # dataset batch size each iteration
+    batch_size_flat = attr.ib(
+        default=256, type=int
+    )  # dataset batch size each iteration
     steps_init = attr.ib(default=int(1e2), type=int)
     steps_init_flat = attr.ib(default=int(1e3), type=int)  # number of initial episodes
     eval_iters = attr.ib(default=10, type=int)

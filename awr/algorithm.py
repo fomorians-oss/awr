@@ -42,13 +42,13 @@ class Algorithm:
 
         if params.flatten:
             n_step = 1
-            params.max_size = param.max_size_flat
-            params.steps_init = param.steps_init_flat
-            params.num_samples = param.num_samples_flat
-            params.batch_size = param.batch_size_flat
+            params.max_size = params.max_size_flat
+            params.steps_init = params.steps_init_flat
+            params.num_samples = params.num_samples_flat
+            params.batch_size = params.batch_size_flat
         else:
             n_step = self.explore_env_model._max_episode_steps
-        
+
         if self.data_dir is not None:
             params.eval_iters = 1
 
@@ -73,10 +73,8 @@ class Algorithm:
 
         self.job = pynr.jobs.Job(directory=job_dir, max_to_keep=5, **checkpointables)
 
-        self.discounted_returns = tf.function(pyrl.targets.discounted_returns)
-        self.generalized_advantage_estimate = tf.function(
-            pyrl.targets.generalized_advantage_estimate
-        )
+        self.discounted_returns = pyrl.targets.discounted_returns
+        self.generalized_advantage_estimate = pyrl.targets.generalized_advantage_estimate
 
         self.explore_strategy = Strategy(self.agent, explore=True)
         self.exploit_strategy = Strategy(self.agent, explore=False)
@@ -101,7 +99,7 @@ class Algorithm:
                 1 - tf.cast(env_outputs.terminal, tf.float32)
             )
             bootstrap_value = tf.squeeze(bootstrap_value)
-
+        
         # Compute discounted returns to use as value network regression targets.
         returns = self.discounted_returns(
             tf.cast(env_outputs.reward, tf.float32) * env_outputs.weight,
@@ -127,7 +125,7 @@ class Algorithm:
                 loss = value_loss / self.params.batch_size
             else:
                 loss = value_loss / (self.params.batch_size * self.max_steps)
-
+            
         # Compute and apply value network gradients.
         variables = self.agent.value_trainable_variables
         grads = tape.gradient(loss, variables)
@@ -162,7 +160,7 @@ class Algorithm:
                 1 - tf.cast(env_outputs.terminal, tf.float32)
             )
             bootstrap_value = tf.squeeze(bootstrap_value)
-
+                
         # Compute advantages using TD(lambda).
         advantages = self.generalized_advantage_estimate(
             tf.cast(env_outputs.reward, tf.float32),
@@ -184,25 +182,15 @@ class Algorithm:
 
             # Compute policy loss as mismatch between policy and scaled advantage distribution.
             policy_loss = -tf.reduce_sum(
-                agent_estimates_output.log_prob
+                tf.squeeze(agent_estimates_output.log_prob)
                 * tf.stop_gradient(score)
                 * env_outputs.weight
             )
 
-            # Compute L2 regularization loss.
-            logits = agent_estimates_output.logits
-            l2_loss = tf.reduce_sum(0.5 * tf.square(logits))
-
             if self.params.flatten:
-                loss = policy_loss / self.params.batch_size + self.params.l2_coef * (
-                    l2_loss / self.params.batch_size
-                )
+                loss = policy_loss / self.params.batch_size
             else:
-                loss = policy_loss / (
-                    self.params.batch_size * self.max_steps
-                ) + self.params.l2_coef * (
-                    l2_loss / (self.params.batch_size * self.max_steps)
-                )
+                loss = policy_loss / (self.params.batch_size * self.max_steps)
 
         # Compute and apply gradients to policy parameters.
         variables = self.agent.policy_trainable_variables
@@ -212,7 +200,6 @@ class Algorithm:
         entropy = tf.reduce_mean(agent_estimates_output.entropy)
         value = tf.reduce_mean(agent_estimates_output.value)
         log_prob = tf.reduce_mean(agent_estimates_output.log_prob)
-        logits = tf.reduce_mean(agent_estimates_output.logits)
 
         # Make summaries.
         if not self.gcp:
@@ -231,9 +218,6 @@ class Algorithm:
                     "losses/policy", policy_loss, step=self.policy_optimizer.iterations
                 )
                 tf.summary.scalar(
-                    "losses/l2", l2_loss, step=self.policy_optimizer.iterations
-                )
-                tf.summary.scalar(
                     "grad_norm/policy", grad_norm, step=self.policy_optimizer.iterations
                 )
                 tf.summary.scalar(
@@ -245,16 +229,13 @@ class Algorithm:
                 tf.summary.scalar(
                     "policy/log_prob", log_prob, step=self.policy_optimizer.iterations
                 )
-                tf.summary.scalar(
-                    "policy/logits", logits, step=self.policy_optimizer.iterations
-                )
 
     def _train_batch(self, agent_outputs, env_outputs):
         # Alternative training value and policy networks.
         self._train_value(env_outputs)
         self._train_policy(agent_outputs, env_outputs)
 
-    @tf.function
+    # @tf.function
     def _train_data(self, agent_outputs, env_outputs):
         # Make tensorflow dataset from batch of sampled trajectories.
         dataset = (
@@ -266,7 +247,6 @@ class Algorithm:
         for agent_outputs, env_outputs in dataset:
             self._train_batch(agent_outputs, env_outputs)
 
-    # @tf.function
     def _collect_transitions(self, policy, episodes):
         # Collect new transitions using the exploration policy.
         with tf.device("/cpu:0"):
