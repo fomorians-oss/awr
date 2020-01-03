@@ -29,7 +29,7 @@ class HyperParams:
     clipnorm = attr.ib(default=1.0, type=float)
     value_scale = attr.ib(default=0.5, type=float)
     lambda_ = attr.ib(default=0.95, type=float)
-    beta = attr.ib(default=0.01, type=float)
+    beta = attr.ib(default=1.0, type=float)
     score_max = attr.ib(default=20.0, type=float)
     l2_coef = attr.ib(default=1e-3, type=float)
 

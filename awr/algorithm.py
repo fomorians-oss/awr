@@ -237,7 +237,7 @@ class Algorithm:
         self._train_value(env_outputs)
         self._train_policy(agent_outputs, env_outputs)
 
-    # @tf.function
+    @tf.function
     def _train_data(self, agent_outputs, env_outputs):
         # Make tensorflow dataset from batch of sampled trajectories.
         dataset = (
@@ -263,7 +263,7 @@ class Algorithm:
             self.buffer.write(flatten_transitions(agent_outputs, env_outputs))
         else:
             self.buffer.write((agent_outputs, env_outputs))
-
+        
         # Make summaries.
         if not self.gcp:
             with self.job.summary_context("train"):
@@ -282,13 +282,13 @@ class Algorithm:
                     agent_outputs, env_outputs = self._collect_transitions(
                         self.explore_strategy, self.params.episodes_train
                     )
+                    episodic_reward = episodic_mean(env_outputs.reward)
 
                 # Update transition buffer with exploration trajectories.
                 self._update_buffer(agent_outputs, env_outputs)
 
                 # Make summaries.
                 with self.job.summary_context("train"):
-                    episodic_reward = episodic_mean(env_outputs.reward)
 
                     tf.summary.scalar(
                         "episodic_rewards/train",

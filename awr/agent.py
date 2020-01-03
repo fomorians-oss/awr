@@ -106,7 +106,7 @@ class Agent(tf.Module):
         state_norm = tf.math.divide_no_nan(
             state - observation_mean, tf.sqrt(observation_var)
         )
-        return state
+        return state_norm
 
     @tf.function
     def initialize(self, env_outputs, agent_outputs):
@@ -142,21 +142,6 @@ class Agent(tf.Module):
     def _continuous(self, hidden):
         loc = self._loc(hidden)
         scale_diag = self._scale_diag(hidden)
-
-        # bijector = tfp.bijectors.Chain(
-        #     [
-        #         tfp.bijectors.Tanh(),
-        #         tfp.bijectors.Affine(shift=loc, scale_diag=scale_diag),
-        #     ]
-        # )
-
-        # base_dist = tfp.distributions.MultivariateNormalDiag(
-        #     loc=tf.zeros_like(loc), scale_diag=tf.ones_like(scale_diag)
-        # )
-        # policy = tfp.distributions.TransformedDistribution(
-        #     distribution=base_dist, bijector=bijector
-        # )
-
         policy = tfp.distributions.Normal(loc=loc, scale=scale_diag)
         return policy
 
