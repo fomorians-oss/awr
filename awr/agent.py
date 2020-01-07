@@ -70,7 +70,7 @@ class Agent(tf.Module):
                 kernel_initializer=logits_initializer,
             )
 
-        self._value = tf.keras.layers.Dense(1) 
+        self._value = tf.keras.layers.Dense(1)
 
     @property
     def value_trainable_variables(self):
@@ -136,7 +136,7 @@ class Agent(tf.Module):
 
     def _discrete(self, hidden):
         logits = self._logits(hidden)
-        policy = tfp.distributions.Categorical(logits=logits)
+        policy = tfp.distributions.Categorical(logits=logits, dtype=tf.int64)
         return policy
 
     def _continuous(self, hidden):
@@ -157,7 +157,7 @@ class Agent(tf.Module):
         else:
             policy = self._continuous(hidden)
             entropy = -policy.log_prob(agent_outputs.action)
-        
+
         log_prob = policy.log_prob(agent_outputs.action)
         value = tf.squeeze(self._value(hidden), axis=-1)
         return AgentPolicyValueOutput(log_prob=log_prob, entropy=entropy, value=value)
@@ -168,6 +168,18 @@ class Agent(tf.Module):
             tf.TensorShape([env_outputs.state.shape[0]]), self.action_spec, tf.zeros
         )
         return AgentPolicyOutput(action=initial_action)
+
+    def policy(self, env_outputs):
+        state = env_outputs.state
+        state = self._scale_state(state)
+        hidden = self._hidden(state)
+
+        if self._is_discrete:
+            policy = self._discrete(hidden)
+        else:
+            policy = self._continuous(hidden)
+
+        return policy
 
     @tf.function
     def step(self, env_outputs, agent_outputs, time_step, explore=True):

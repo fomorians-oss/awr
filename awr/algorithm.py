@@ -5,18 +5,21 @@ import numpy as np
 import pyoneer as pynr
 import pyoneer.rl as pyrl
 import tensorflow as tf
+from pyoneer.rl.rollouts.gym_ops import Transition
 
 from awr.agent import Agent
 from awr.strategies import Strategy
 from awr.env import create_env_model
+from awr.utils import compute_ris_estimate
 from awr.data import episodic_mean, flatten_transitions
 
 
 class Algorithm:
-    def __init__(self, job_dir, params, data_dir=None, gcp=False):
+    def __init__(self, job_dir, params, data_dir=None, behavioral_dir=None, gcp=False):
         self.job_dir = job_dir
         self.params = params
         self.data_dir = data_dir
+        self.behavioral_dir = behavioral_dir
         self.gcp = gcp
 
         self.explore_env_model = create_env_model(params.env, params.episodes_train)
@@ -64,6 +67,26 @@ class Algorithm:
             self.online_job = pynr.jobs.Job(directory=data_dir, buffer=self.buffer)
             status = self.online_job.restore().expect_partial()
 
+        # Load behavioral policy model if directory specified.
+        if behavioral_dir is not None:
+            self.behavioral_agent = Agent(
+                self.explore_env_model.observation_space,
+                self.explore_env_model.action_space,
+                self.explore_env_model.state_spec,
+                self.explore_env_model.action_spec,
+            )
+            self.behavioral_job = pynr.jobs.Job(
+                directory=behavioral_dir, behavioral_agent=self.behavioral_agent
+            )
+
+            # Make TF dataset from behavioral data.
+            agent_outputs, env_outputs = self.buffer._trajectories
+            self.behavioral_dataset = (
+                tf.data.Dataset.from_tensor_slices((*agent_outputs, *env_outputs))
+                .batch(batch_size=self.params.batch_size, drop_remainder=True)
+                .shuffle(buffer_size=self.params.max_size)
+            )
+
         checkpointables = {
             "agent": self.agent,
             "value_optimizer": self.value_optimizer,
@@ -74,7 +97,9 @@ class Algorithm:
         self.job = pynr.jobs.Job(directory=job_dir, max_to_keep=5, **checkpointables)
 
         self.discounted_returns = pyrl.targets.discounted_returns
-        self.generalized_advantage_estimate = pyrl.targets.generalized_advantage_estimate
+        self.generalized_advantage_estimate = (
+            pyrl.targets.generalized_advantage_estimate
+        )
 
         self.explore_strategy = Strategy(self.agent, explore=True)
         self.exploit_strategy = Strategy(self.agent, explore=False)
@@ -100,7 +125,7 @@ class Algorithm:
                 1 - tf.cast(env_outputs.terminal, tf.float32)
             )
             bootstrap_value = tf.squeeze(bootstrap_value)
-        
+
         # Compute discounted returns to use as value network regression targets.
         returns = self.discounted_returns(
             tf.cast(env_outputs.reward, tf.float32) * env_outputs.weight,
@@ -126,7 +151,7 @@ class Algorithm:
                 loss = value_loss / self.params.batch_size
             else:
                 loss = value_loss / (self.params.batch_size * self.max_steps)
-            
+
         # Compute and apply value network gradients.
         variables = self.agent.value_trainable_variables
         grads = tape.gradient(loss, variables)
@@ -162,7 +187,7 @@ class Algorithm:
                 1 - tf.cast(env_outputs.terminal, tf.float32)
             )
             bootstrap_value = tf.squeeze(bootstrap_value)
-                
+
         # Compute advantages using TD(lambda).
         advantages = self.generalized_advantage_estimate(
             tf.cast(env_outputs.reward, tf.float32),
@@ -177,12 +202,14 @@ class Algorithm:
             # Compute estimate of policy distribution.
             agent_estimates_output = self.agent.policy_value(env_outputs, agent_outputs)
 
-            # Compute unnormalized distribution implied by scaled, exponentiated advantages.
+            # Compute unnormalized distribution
+            # implied by scaled, exponentiated advantages.
             score = tf.minimum(
                 tf.exp(advantages / self.params.beta), self.params.score_max
             )
 
-            # Compute policy loss as mismatch between policy and scaled advantage distribution.
+            # Compute policy loss as mismatch between
+            # policy and scaled advantage distribution.
             policy_loss = -tf.reduce_sum(
                 tf.squeeze(agent_estimates_output.log_prob)
                 * tf.stop_gradient(score)
@@ -263,7 +290,7 @@ class Algorithm:
             self.buffer.write(flatten_transitions(agent_outputs, env_outputs))
         else:
             self.buffer.write((agent_outputs, env_outputs))
-        
+
         # Make summaries.
         if not self.gcp:
             with self.job.summary_context("train"):
@@ -289,7 +316,6 @@ class Algorithm:
 
                 # Make summaries.
                 with self.job.summary_context("train"):
-
                     tf.summary.scalar(
                         "episodic_rewards/train",
                         episodic_reward,
@@ -311,6 +337,15 @@ class Algorithm:
         tf.print("Iteration %d" % it)
 
     def _eval(self, it):
+        if self.behavioral_dir is not None:
+            # Estimate evaluation performance of
+            # policy using regression importance sampling.
+            estimated_reward = compute_ris_estimate(
+                behavioral_agent=self.behavioral_agent,
+                evaluation_agent=self.agent,
+                dataset=self.behavioral_dataset,
+            )
+
         # Run rollouts under exploitation policy to evaluate performance.
         agent_outputs, eval_env_outputs = self.exploit_rollout().outputs
         eval_returns = tf.reduce_sum(
@@ -327,14 +362,19 @@ class Algorithm:
                 step=self.policy_optimizer.iterations,
             )
 
+            if self.behavioral_dir is not None:
+                tf.summary.scalar(
+                    "episodic_rewards/estimated",
+                    estimated_reward,
+                    step=self.policy_optimizer.iterations,
+                )
+
             if not self.gcp:
                 tf.summary.histogram(
                     "policy/eval/actions",
                     agent_outputs.action,
                     step=self.policy_optimizer.iterations,
                 )
-
-        tf.print("Eval reward: %.3f" % episodic_reward.numpy())
 
     def _train_iter(self, it):
         # Train.
@@ -378,3 +418,158 @@ class Algorithm:
         for it in range(self.params.iterations):
             with pynr.debugging.Stopwatch() as stopwatch:
                 self._train_iter(it)
+
+    def eval(self):
+        self.job.restore().expect_partial()
+
+        agent_outputs, eval_env_outputs = self.exploit_rollout().outputs
+        eval_returns = tf.reduce_sum(
+            tf.cast(eval_env_outputs.reward, tf.float32) * eval_env_outputs.weight,
+            axis=1,
+        )
+        episodic_reward = tf.reduce_mean(eval_returns)
+        print("Average episodic reward:", episodic_reward.numpy())
+
+    def train_behavioral_policy_model(self):
+        self.online_job = pynr.jobs.Job(
+            directory=self.data_dir, agent=self.agent, buffer=self.buffer
+        )
+        status = self.online_job.restore().expect_partial()
+
+        # Fit behavior policy to batch dataset.
+        behavioral_agent = Agent(
+            self.explore_env_model.observation_space,
+            self.explore_env_model.action_space,
+            self.explore_env_model.state_spec,
+            self.explore_env_model.action_spec,
+        )
+        behavioral_policy_optimizer = tf.keras.optimizers.Adam(
+            self.params.learning_rate, clipnorm=self.params.clipnorm
+        )
+
+        behavioral_job = pynr.jobs.Job(
+            directory=self.job_dir, behavioral_agent=behavioral_agent
+        )
+
+        agent_outputs, env_outputs = self.buffer._trajectories
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (*agent_outputs, *env_outputs)
+        ).shuffle(buffer_size=1000)
+
+        split = int(0.8 * self.params.max_size)
+
+        train_dataset = dataset.take(split).batch(self.params.batch_size).repeat()
+        valid_dataset = dataset.skip(split).batch(self.params.batch_size).repeat()
+        train_iterator = iter(train_dataset)
+        valid_iterator = iter(valid_dataset)
+
+        loss_fn = tf.keras.losses.BinaryCrossentropy()
+
+        for it in range(self.params.behavioral_iterations):
+            print("Iteration:", it)
+
+            if it % 50 == 0 or it == self.params.behavioral_iterations - 1:
+                # Make behavioral agent strategy and rollout.
+                strategy = Strategy(behavioral_agent, explore=False)
+                rollout = pyrl.rollouts.Rollout(
+                    env=self.exploit_env_model, agent=strategy, n_step=self.max_steps
+                )
+
+                agent_outputs, eval_env_outputs = rollout().outputs
+                eval_returns = tf.reduce_sum(
+                    tf.cast(eval_env_outputs.reward, tf.float32)
+                    * eval_env_outputs.weight,
+                    axis=1,
+                )
+                behavioral_reward = tf.reduce_mean(eval_returns)
+
+                # Rollout online agent for comparison.
+                agent_outputs, eval_env_outputs = self.exploit_rollout().outputs
+                eval_returns = tf.reduce_sum(
+                    tf.cast(eval_env_outputs.reward, tf.float32)
+                    * eval_env_outputs.weight,
+                    axis=1,
+                )
+                online_reward = tf.reduce_mean(eval_returns)
+
+                # Make summaries.
+                with self.job.summary_context("eval"):
+                    tf.summary.scalar(
+                        "behavioral/reward",
+                        behavioral_reward,
+                        step=behavioral_policy_optimizer.iterations,
+                    )
+                    tf.summary.scalar(
+                        "behavioral/reward/online",
+                        online_reward,
+                        step=behavioral_policy_optimizer.iterations,
+                    )
+
+                behavioral_job.save(
+                    checkpoint_number=behavioral_policy_optimizer.iterations
+                )
+                behavioral_job.flush_summaries()
+
+            action, state, reward, next_state, terminal, weight = next(train_iterator)
+            env_outputs = Transition(
+                state=state,
+                reward=reward,
+                next_state=next_state,
+                terminal=terminal,
+                weight=weight,
+            )
+
+            with tf.GradientTape() as tape:
+                # Compute most likely actions under policy.
+                policy = behavioral_agent.policy(env_outputs)
+
+                # Compute model policy loss (hill climb on likelihood on data).
+                loss = -policy.log_prob(action)
+                loss = tf.reduce_mean(loss)
+
+                if self.params.flatten:
+                    loss = loss / self.params.batch_size
+                else:
+                    loss = loss / (self.params.batch_size * self.max_steps)
+
+            # Compute and apply gradients to policy parameters.
+            variables = behavioral_agent.policy_trainable_variables
+            grads = tape.gradient(loss, variables)
+            behavioral_policy_optimizer.apply_gradients(zip(grads, variables))
+
+            # Make summaries.
+            with self.job.summary_context("eval"):
+                tf.summary.scalar(
+                    "behavioral/train/loss",
+                    loss,
+                    step=behavioral_policy_optimizer.iterations,
+                )
+
+            action, state, reward, next_state, terminal, weight = next(valid_iterator)
+            env_output = Transition(
+                state=state,
+                reward=reward,
+                next_state=next_state,
+                terminal=terminal,
+                weight=weight,
+            )
+
+            # Compute most likely actions under policy.
+            policy = behavioral_agent.policy(env_output)
+
+            # Compute model policy loss (hill climb on likelihood on data).
+            loss = -policy.log_prob(action)
+            loss = tf.reduce_mean(loss)
+
+            if self.params.flatten:
+                loss = loss / self.params.batch_size
+            else:
+                loss = loss / (self.params.batch_size * self.max_steps)
+
+            # Make summaries.
+            with self.job.summary_context("eval"):
+                tf.summary.scalar(
+                    "behavioral/valid/loss",
+                    loss,
+                    step=behavioral_policy_optimizer.iterations,
+                )

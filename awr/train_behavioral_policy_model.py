@@ -12,11 +12,10 @@ from awr.algorithm import Algorithm
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-dir", required=True, type=str)
+    parser.add_argument("--data-dir", required=True, type=str)
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--env", default="CartPole-v0")
     parser.add_argument("--flatten", action="store_true")
-    parser.add_argument("--data-dir", type=str)
-    parser.add_argument("--behavioral-dir", type=str)
     parser.add_argument("--gcp", action="store_true")
     args = parser.parse_args()
     print("args:", args)
@@ -39,13 +38,9 @@ def main():
 
     # training
     algorithm = Algorithm(
-        job_dir=job_dir,
-        params=params,
-        data_dir=args.data_dir,
-        behavioral_dir=args.behavioral_dir,
-        gcp=args.gcp,
+        job_dir=job_dir, params=params, data_dir=args.data_dir, gcp=args.gcp
     )
-    algorithm.train()
+    algorithm.train_behavioral_policy_model()
 
 
 if __name__ == "__main__":
